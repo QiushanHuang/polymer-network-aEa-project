@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+Result_*/
+experiments/
+polymer-network-inputs/smoke-run/
+polymer-network-inputs/*.smoke.in

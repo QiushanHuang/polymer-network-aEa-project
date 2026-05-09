@@ -1,0 +1,206 @@
+# Polymer network input generated from the sphere-chain parameter set.
+# Geometry and topology are read from the generated data file; thermostat,
+# temperature reporting, pair style, bond style, and output blocks follow the
+# reference sphere-chain inputs.
+
+dimension       3
+boundary        p p p
+units           lj
+atom_style      hybrid ellipsoid bond
+
+neighbor        0.3 bin
+neigh_modify    delay 0 every 1 check yes
+comm_style      tiled
+
+variable        Nchain          equal 1
+variable        Nell            equal 672
+variable        Nsph            equal 9248
+variable        Nanchor         equal 1344
+variable        Nmol            equal 11264
+variable        Network_topology_mode string unified_lattice
+variable        Network_cells_x equal 7
+variable        Network_cells_y equal 7
+variable        Network_cells_z equal 7
+variable        Horizontal_S_count equal 7
+variable        Vertical_S_count equal 7
+variable        X_S_count equal 10
+variable        Y_S_count equal 10
+variable        Z_S_count equal 10
+variable        edge_gap        equal 0.01
+
+variable        HeatingT   equal 4.7
+variable        CoolingT   equal 3.7
+variable        Tstar_list index 1.40
+
+variable        rho     equal 0.3
+variable        insertion_density_tag string rho050
+variable        TS      equal 0.001
+variable        heatingTime      equal 10/${TS}
+variable        coolingTime      equal 20/${TS}
+variable        RunTime equal 4000/${TS}
+variable        DT      equal ${RunTime}/4000
+variable        DR      equal ${DT}*500
+variable        Tdamp   equal ${TS}*100
+variable        Tchain   equal 3
+
+variable        k_bond_ss   equal 250.0
+variable        k_bond_se   equal 250.0
+variable        r0_ss       equal 1.0
+variable        r0_se       equal 2.0
+variable        ds_a        equal 0.50
+variable        dA          equal 0.00001
+variable        mA          equal 0.00001
+variable        r0_sa       equal 0.50
+variable        r0_ae       equal 1.50
+
+variable        dS_star equal 1
+variable        dE_star equal 3
+variable        d_shper equal 1
+variable        dS      equal ${dS_star}
+variable        dE      equal ${dE_star}
+variable        a_semi0 equal ${dS}/2.0
+variable        b_semi0 equal ${dS}/2.0
+variable        c_semi0 equal ${dE}/2.0
+
+variable        gb_gamma    equal 1.0
+variable        gb_upsilon  equal 3
+variable        gb_mu       equal 1
+variable        gb_rcutstar equal 5
+variable        epsilon0    equal 1
+variable        sig0        equal 1
+variable        eps_a       equal 1
+variable        eps_b       equal 1
+variable        eps_c       equal 0.2
+variable        gb_rcut     equal v_sig0*${gb_rcutstar}
+
+variable        PI        equal 3.141592653589793
+variable        Vp_ell    equal (4.0/3.0)*(v_PI*(v_a_semi0*v_b_semi0*v_c_semi0))
+variable        Vp_sph    equal (4.0/3.0)*(v_PI*(0.5*0.5*0.5))
+variable        Vp_anc    equal (4.0/3.0)*(v_PI*((v_dA/2.0)*(v_dA/2.0)*(v_dA/2.0)))
+variable        Vtot_part equal (${Nell}*v_Vp_ell+${Nsph}*v_Vp_sph+${Nanchor}*v_Vp_anc)
+
+bond_style      harmonic
+read_data       /Users/joshua/Desktop/MD/polymer-network-aEa-project/polymer-network-inputs/MD_polymer_network_aEa.data
+
+group           ellipsoid type 1
+group           sphere    type 2
+group           anchor    type 3
+group           rigid_lc  type 1 3
+
+variable        Nell_now equal count(ellipsoid)
+variable        Nsph_now equal count(sphere)
+variable        Nanc_now equal count(anchor)
+print           "NETWORK COUNT CHECK: target Nell=${Nell}, target Nsph=${Nsph}, target Nanchor=${Nanchor}; actual Nell=${Nell_now}, actual Nsph=${Nsph_now}, actual Nanchor=${Nanc_now}"
+print           "NETWORK GEOMETRY CHECK: S-S initial center distance = $(v_dS+v_edge_gap), target S-E center distance = $(0.5*v_dE+0.5*v_dS+v_edge_gap); preserve-grid metadata is in the generated JSON sidecar"
+
+variable        dB      equal 1.0
+variable        epsSS   equal 1.0
+variable        sigSS   equal ${dB}
+variable        epsSE   equal ${epsilon0}
+variable        sigSE   equal ${sig0}
+variable        rc_wca  equal 1.122462048309373*${sigSS}
+variable        sigAA   equal ${dA}
+variable        rcAA    equal 1.122462048309373*v_sigAA
+variable        sigSA   equal 0.5*(${sigSS}+${dA})
+variable        rcSA    equal 1.122462048309373*v_sigSA
+variable        sigEA   equal 0.5*(${sig0}+${dA})
+variable        rcEA    equal 1.122462048309373*v_sigEA
+
+bond_coeff      1 ${k_bond_ss} ${r0_ss}
+bond_coeff      2 ${k_bond_ss} ${r0_sa}
+bond_coeff      3 1.0 1.0
+bond_coeff      4 1.0 1.0
+special_bonds   lj 0.0 1.0 1.0
+
+pair_style      hybrid gayberne ${gb_gamma} ${gb_upsilon} ${gb_mu} ${gb_rcut} lj/cut ${rc_wca}
+pair_modify     shift yes
+pair_coeff      1 1 gayberne ${epsilon0} ${sig0} ${eps_a} ${eps_b} ${eps_c} ${eps_a} ${eps_b} ${eps_c} ${gb_rcut}
+pair_coeff      2 2 lj/cut ${epsSS} ${sigSS} ${rc_wca}
+pair_coeff      3 3 lj/cut 0.000001 ${sigAA} ${rcAA}
+pair_coeff      2 3 lj/cut 0.000001 ${sigSA} ${rcSA}
+pair_coeff      1 3 lj/cut 0.000001 ${sigEA} ${rcEA}
+pair_coeff      1 2 gayberne ${epsSE} ${sigSE} ${eps_a} ${eps_b} ${eps_c} 1.0 1.0 1.0 ${gb_rcut}
+
+compute         T_sph sphere temp
+compute_modify  T_sph extra/dof 0
+compute         KE_ell ellipsoid ke
+compute         ER_ell ellipsoid erotate/asphere
+variable        dof_sph   equal 3*count(sphere)
+variable        dof_ell   equal 5*count(ellipsoid)
+variable        dof_mix   equal v_dof_sph+v_dof_ell
+variable        T_ell     equal 2.0*(c_KE_ell+c_ER_ell)/(v_dof_ell+1.0e-17)
+variable        T_mix     equal (v_dof_sph*c_T_sph+v_dof_ell*v_T_ell)/v_dof_mix
+
+compute         orient all property/atom quatw quati quatj quatk
+compute         shape  all property/atom shapex shapey shapez
+
+thermo          ${DT}
+thermo_style    custom step temp v_T_mix c_T_sph v_T_ell v_dof_sph v_dof_ell v_dof_mix ebond pe ke etotal press vol v_Nell_now v_Nsph_now v_Nanc_now
+thermo_modify   flush yes
+timestep        ${TS}
+
+label           loop_Tstar
+variable        Tstar_str delete
+variable        Tstar_str string ${Tstar_list}
+print           "THERMOSTAT CHECK: both fixes use T*=${Tstar_str}; reported T_mix uses 5*NE + 3*NS DOF and ignores anchors"
+
+variable        Tstar_tag delete
+if "${Tstar_str} == 1.40" then "variable Tstar_tag string Tstar_1.40"
+
+shell           mkdir -p ${Tstar_tag}
+log             ${Tstar_tag}/log.${Tstar_tag}.lammps
+print           "=== START TSTAR LOOP: T*=${Tstar_str}, folder=${Tstar_tag} ==="
+
+variable        rho_str string 0.30
+variable        rho_star_inst equal v_Vtot_part/vol
+variable        Lx_loop equal lx
+variable        V_loop  equal vol
+print           "RHO CHECK: fixed rho=${rho_str} actual lx=${Lx_loop} vol=${V_loop} inst rho(volume-fraction form)=${rho_star_inst}"
+
+velocity        all create ${Tstar_str} 13579 dist gaussian mom yes rot yes loop geom
+
+variable        Nelli_now equal count(ellipsoid)
+variable        Nsphi_now equal count(sphere)
+variable        Nanci_now equal count(anchor)
+print           "VELOCITY INIT CHECK: Nell(group)=${Nelli_now}, Nsph(group)=${Nsphi_now}, Nanchor(group)=${Nanci_now}; anchors and ellipsoids are rigidified as a-E-a units"
+print           "OVITO OUTPUT CHECK: particle trajectory dump = HEAV.${insertion_density_tag}.*.dump ; static topology file = TOPOLOGY.${insertion_density_tag}.data"
+
+dump            1 all custom ${DT} ${Tstar_tag}/HEAV.${insertion_density_tag}.*.dump id type x y z xu yu zu vx vy vz c_orient[1] c_orient[2] c_orient[3] c_orient[4] c_shape[1] c_shape[2] c_shape[3] mass
+dump_modify     1 colname c_orient[1] quatw colname c_orient[2] quati colname c_orient[3] quatj colname c_orient[4] quatk
+dump_modify     1 colname c_shape[1] shapex colname c_shape[2] shapey colname c_shape[3] shapez
+
+compute         bond_topo all property/local btype batom1 batom2
+write_data      ${Tstar_tag}/TOPOLOGY.${insertion_density_tag}.data
+restart         ${DR} ${Tstar_tag}/Restart.GB.${insertion_density_tag}.*
+
+compute         myRDF all rdf 200
+fix             RDFout all ave/time 100 10 1000 c_myRDF[*] file ${Tstar_tag}/rdf.${insertion_density_tag}.dat mode vector
+
+variable        TS_prod equal ${TS}
+variable        kss_prod equal ${k_bond_ss}
+variable        kse_prod equal ${k_bond_se}
+timestep        0.0002
+bond_coeff      1 50.0 ${r0_ss}
+bond_coeff      2 50.0 ${r0_sa}
+fix             temp_control_lc rigid_lc rigid/nvt/small molecule temp ${Tstar_str} ${Tstar_str} ${Tdamp}
+fix             temp_control_sph sphere nvt temp ${Tstar_str} ${Tstar_str} ${Tdamp} tchain ${Tchain}
+fix_modify      temp_control_sph temp T_sph
+run             5000
+
+bond_coeff      1 ${kss_prod} ${r0_ss}
+bond_coeff      2 ${kss_prod} ${r0_sa}
+timestep        ${TS_prod}
+run             ${RunTime}
+
+unfix           temp_control_lc
+unfix           temp_control_sph
+unfix           RDFout
+uncompute       myRDF
+uncompute       bond_topo
+undump          1
+
+write_restart   ${Tstar_tag}/Final.${insertion_density_tag}.bin
+log             none
+print           "=== FINISH TSTAR LOOP: T*=${Tstar_str}, folder=${Tstar_tag} ==="
+next            Tstar_list
+jump            SELF loop_Tstar
