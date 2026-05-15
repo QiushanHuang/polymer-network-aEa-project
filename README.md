@@ -225,6 +225,10 @@ python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase 
 python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase --input-mode dat --bins 60 --min-timestep 200000 --max-timestep 600000
 ```
 
+V2 prints progress by default while scanning and processing dump files. Use
+`--progress-every 25` to print more often on long convex-hull runs, or
+`--quiet` to suppress progress messages.
+
 Changing `--method` changes the definition of volume, so it requires a new
 per-frame cache. Convex hull volume needs SciPy:
 

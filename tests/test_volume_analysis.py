@@ -1,3 +1,5 @@
+import contextlib
+import io
 import tempfile
 import unittest
 from dataclasses import replace
@@ -265,6 +267,7 @@ class VolumeAnalysisTests(unittest.TestCase):
                     "0.60",
                     "--block-size",
                     "1",
+                    "--quiet",
                 ]
             )
 
@@ -273,6 +276,46 @@ class VolumeAnalysisTests(unittest.TestCase):
             self.assertEqual(result.out_dir, root.resolve())
             self.assertTrue((root / FRAME_CACHE_DAT).exists())
             self.assertTrue((root / "Volume_probability_summary_V2.dat").exists())
+
+    def test_volume_probability_v2_cli_reports_dump_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tstar_dir = root / "cases" / "lcden125_seed12345" / "result" / "Tstar_1.40"
+            tstar_dir.mkdir(parents=True)
+            for index in range(2):
+                (tstar_dir / f"HEAV.lcden125.sample.{index}.dump").write_text(
+                    _dump_text(True, timestep=100 + index),
+                    encoding="utf-8",
+                )
+            args = build_arg_parser().parse_args(
+                [
+                    str(root),
+                    "--no-plots",
+                    "--input-mode",
+                    "dump",
+                    "--bins",
+                    "4",
+                    "--grid-spacing",
+                    "1.0",
+                    "--threshold",
+                    "0.60",
+                    "--block-size",
+                    "1",
+                    "--progress-every",
+                    "1",
+                ]
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                run_analysis(args)
+
+            text = output.getvalue()
+            self.assertIn("[INFO] root =", text)
+            self.assertIn("found 2 sample dump files", text)
+            self.assertIn("processing dump 1/2", text)
+            self.assertIn("processed 2/2 dump files", text)
+            self.assertIn("wrote frame cache", text)
 
     def test_convex_hull_reports_missing_scipy(self):
         points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]

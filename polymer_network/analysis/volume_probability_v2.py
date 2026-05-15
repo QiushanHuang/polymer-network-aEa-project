@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import math
 import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, median, stdev
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .dump import parse_lammps_dump_frames
 from .volume import convex_hull_volume, gaussian_density_volume
@@ -69,6 +70,8 @@ def analyze_volume_probability_v2(
     write_plots: bool = True,
     write_each_tstar: bool = False,
     show: bool = False,
+    verbose: bool = False,
+    progress_every: int = 100,
 ) -> VolumeProbabilityV2Result:
     if selected_types is None:
         selected_types = {1, 2}
@@ -82,6 +85,7 @@ def analyze_volume_probability_v2(
         max_acf_lag=max_acf_lag,
         min_timestep=min_timestep,
         max_timestep=max_timestep,
+        progress_every=progress_every,
     )
 
     root = Path(root_dir).expanduser().resolve()
@@ -89,12 +93,19 @@ def analyze_volume_probability_v2(
     if not output.is_absolute():
         output = root / output
     output.mkdir(parents=True, exist_ok=True)
+    progress = progress_logger(verbose)
+    log_progress(progress, f"root = {root}")
+    log_progress(progress, f"out_dir = {output}")
+    log_progress(progress, f"requested input mode = {input_mode}")
+    log_progress(progress, f"method = {method}; phase = {phase}; selected_types = {','.join(str(item) for item in sorted(selected_types))}")
 
     resolved_mode = resolve_input_mode(input_mode, root, out_dir=output, phase=phase, method=method)
+    log_progress(progress, f"resolved input mode = {resolved_mode}")
     if resolved_mode == "dat":
         cache_path = find_frame_cache(root, out_dir=output, method=method)
         if cache_path is None:
             raise ValueError(f"No {FRAME_CACHE_DAT} cache for method={method} found under {output} or {root}")
+        log_progress(progress, f"reading frame cache = {cache_path}")
         frame_records = load_frame_cache(
             cache_path,
             tail_frames_per_tstar=tail_frames_per_tstar,
@@ -113,7 +124,10 @@ def analyze_volume_probability_v2(
             gaussian_cutoff_q2=gaussian_cutoff_q2,
             selected_types=selected_types,
             phase=phase,
+            progress=progress,
+            progress_every=progress_every,
         )
+        log_progress(progress, f"computed {len(cached_frame_records)} cached frame records")
         write_frame_cache(
             output / FRAME_CACHE_DAT,
             cached_frame_records,
@@ -130,6 +144,7 @@ def analyze_volume_probability_v2(
                 "cached_frame_selection = all_matching_sample_frames",
             ],
         )
+        log_progress(progress, f"wrote frame cache = {output / FRAME_CACHE_DAT}")
         frame_records = select_tail_frame_records(
             cached_frame_records,
             tail_frames_per_tstar=tail_frames_per_tstar,
@@ -142,6 +157,8 @@ def analyze_volume_probability_v2(
 
     if not frame_records:
         raise ValueError(f"No usable {phase} volume frames found under {root}")
+    log_progress(progress, f"selected frames for statistics/plots = {len(frame_records)}")
+    log_progress(progress, f"building distributions with bins={bins}")
 
     cases = build_case_distributions(
         frame_records,
@@ -154,6 +171,7 @@ def analyze_volume_probability_v2(
     )
     if not cases:
         raise ValueError("No volume distributions could be built from the selected frames")
+    log_progress(progress, f"built distributions for {len(cases)} case(s)")
 
     summary_records: list[dict[str, object]] = []
     bin_records: list[dict[str, object]] = []
@@ -165,11 +183,15 @@ def analyze_volume_probability_v2(
         bin_records.extend(case_bins)
         per_case_bin_records[str(case["label"])] = case_bins
 
+    log_progress(progress, "writing summary/bin/phase dat outputs")
     write_outputs(output, summary_records, bin_records, per_case_bin_records)
     write_phase_diagram(output / PHASE_DAT, summary_records)
 
     if write_plots:
+        log_progress(progress, "writing figure outputs")
         plot_cases(cases, output, write_each_tstar=write_each_tstar, show=show)
+    else:
+        log_progress(progress, "plot writing disabled by --no-plots")
 
     return VolumeProbabilityV2Result(
         frame_records=frame_records,
@@ -191,6 +213,7 @@ def _validate_common_args(
     max_acf_lag: int,
     min_timestep: int | None,
     max_timestep: int | None,
+    progress_every: int,
 ) -> None:
     if bins <= 0:
         raise ValueError("bins must be positive")
@@ -208,6 +231,23 @@ def _validate_common_args(
         raise ValueError("max_acf_lag must be positive")
     if min_timestep is not None and max_timestep is not None and min_timestep > max_timestep:
         raise ValueError("min_timestep must be less than or equal to max_timestep")
+    if progress_every <= 0:
+        raise ValueError("progress_every must be positive")
+
+
+def progress_logger(verbose: bool) -> Callable[[str], None] | None:
+    if not verbose:
+        return None
+
+    def log(message: str) -> None:
+        print(f"[INFO] {message}", flush=True)
+
+    return log
+
+
+def log_progress(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
 
 
 def resolve_input_mode(
@@ -274,17 +314,37 @@ def build_frame_records_from_dump_tree(
     gaussian_cutoff_q2: float,
     selected_types: set[int],
     phase: str,
+    progress: Callable[[str], None] | None = None,
+    progress_every: int = 100,
 ) -> list[dict[str, object]]:
     root = Path(root_dir).expanduser().resolve()
+    start_time = time.monotonic()
+    log_progress(progress, f"scanning for *.{phase}.*.dump under {root}")
+    raw_dump_paths = sorted(root.rglob(f"*.{phase}.*.dump"))
+    log_progress(
+        progress,
+        (
+            f"found {len(raw_dump_paths)} {phase} dump files "
+            f"across {len({ _case_label(path) for path in raw_dump_paths })} case(s) "
+            f"and {len({ _tstar_label(path) for path in raw_dump_paths })} Tstar folder(s)"
+        ),
+    )
     dump_paths = _selected_phase_dump_paths(
-        sorted(root.rglob(f"*.{phase}.*.dump")),
+        raw_dump_paths,
         tail_frames_per_tstar=None,
         stride=1,
     )
+    if dump_paths:
+        log_progress(progress, f"first dump = {dump_paths[0]}")
+        log_progress(progress, f"last dump = {dump_paths[-1]}")
     records: list[dict[str, object]] = []
+    total_dumps = len(dump_paths)
     for read_order, dump_path in enumerate(dump_paths):
         case_label = _case_label(dump_path)
         tstar = _tstar_label(dump_path)
+        dump_number = read_order + 1
+        if dump_number == 1 or dump_number == total_dumps or dump_number % progress_every == 0:
+            log_progress(progress, f"processing dump {dump_number}/{total_dumps}: case={case_label} tstar={tstar} file={dump_path.name}")
         for frame in parse_lammps_dump_frames(dump_path, require_unwrapped=True):
             atoms = frame.selected_atoms(selected_types)
             volume = frame_volume(
@@ -307,6 +367,9 @@ def build_frame_records_from_dump_tree(
                     "_read_order": read_order,
                 }
             )
+        if dump_number == total_dumps or dump_number % progress_every == 0:
+            elapsed = time.monotonic() - start_time
+            log_progress(progress, f"processed {dump_number}/{total_dumps} dump files; cached_frames={len(records)}; elapsed={elapsed:.1f}s")
     if not records:
         raise ValueError(f"No {phase} dump frames found under {root}")
     return sorted(records, key=frame_sort_key)
@@ -1571,6 +1634,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smooth-window", type=int, default=5)
     parser.add_argument("--min-peak-fraction", type=float, default=0.08)
     parser.add_argument("--max-acf-lag", type=int, default=1000)
+    parser.add_argument("--progress-every", type=int, default=100, help="Report progress every N dump files in dump mode. Default: 100.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress output.")
     parser.add_argument("--no-plots", action="store_true", help="Write dat outputs only.")
     parser.add_argument("--write-each-tstar", action="store_true", help="Also write one diagnostic PNG per Tstar.")
     parser.add_argument("--show", action="store_true", help="Open each combined matplotlib window.")
@@ -1607,6 +1672,8 @@ def run_analysis(args: argparse.Namespace) -> VolumeProbabilityV2Result:
         write_plots=not args.no_plots,
         write_each_tstar=args.write_each_tstar,
         show=args.show,
+        verbose=not args.quiet,
+        progress_every=args.progress_every,
     )
 
 
