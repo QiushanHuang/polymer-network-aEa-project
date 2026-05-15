@@ -1,3 +1,5 @@
+import contextlib
+import io
 import tempfile
 import unittest
 from dataclasses import replace
@@ -10,9 +12,17 @@ from polymer_network.analysis.volume import (
     gaussian_density_volume,
 )
 from polymer_network.analysis.volume_probability import analyze_volume_probability
+from polymer_network.analysis.volume_probability_v2 import (
+    FRAME_CACHE_DAT,
+    analyze_volume_probability_v2,
+    build_arg_parser,
+    load_frame_cache,
+    resolve_input_mode,
+    run_analysis,
+)
 
 
-def _dump_text(include_unwrapped=True):
+def _dump_text(include_unwrapped=True, timestep=100):
     coord_cols = "x y z xu yu zu" if include_unwrapped else "x y z"
     atom_rows = [
         "1 1 1 1 1 1 1 1 1 0 0 0 1 1 3 1.0",
@@ -28,7 +38,7 @@ def _dump_text(include_unwrapped=True):
     return "\n".join(
         [
             "ITEM: TIMESTEP",
-            "100",
+            str(timestep),
             "ITEM: NUMBER OF ATOMS",
             "3",
             "ITEM: BOX BOUNDS pp pp pp",
@@ -177,6 +187,135 @@ class VolumeAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "No sample dump frames"):
                 analyze_volume_probability(Path(temp_dir), out_dir=Path(temp_dir) / "analysis")
+
+    def test_volume_probability_v2_writes_and_reuses_frame_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tstar_dir = root / "cases" / "lcden125_seed12345" / "result" / "Tstar_1.40"
+            tstar_dir.mkdir(parents=True)
+            for index in range(3):
+                (tstar_dir / f"HEAV.lcden125.sample.{index}.dump").write_text(
+                    _dump_text(True, timestep=100 + index),
+                    encoding="utf-8",
+                )
+            out_dir = root / "analysis_v2"
+
+            result = analyze_volume_probability_v2(
+                root,
+                out_dir=out_dir,
+                input_mode="dump",
+                bins=4,
+                grid_spacing=1.0,
+                threshold=0.60,
+                block_size=1,
+                tail_frames_per_tstar=1,
+                write_plots=False,
+            )
+
+            cache_path = out_dir / FRAME_CACHE_DAT
+            self.assertTrue(cache_path.exists())
+            cache_text = cache_path.read_text(encoding="utf-8")
+            self.assertIn("row_kind", cache_text)
+            self.assertIn("volume", cache_text)
+            self.assertEqual(len(result.frame_records), 1)
+            self.assertTrue((out_dir / "Volume_probability_summary_V2.dat").exists())
+            self.assertTrue((out_dir / "Volume_probability_bins_all_cases_V2.dat").exists())
+
+            cached = load_frame_cache(cache_path)
+            self.assertEqual(len(cached), 3)
+            self.assertEqual(cached[0]["case_label"], "lcden125_seed12345")
+            self.assertEqual(cached[0]["tstar"], "Tstar_1.40")
+            self.assertEqual(float(cached[-1]["volume"]), float(result.frame_records[0]["volume"]))
+
+            self.assertEqual(resolve_input_mode("auto", root, out_dir=out_dir), "dat")
+            self.assertEqual(resolve_input_mode("auto", root, out_dir=out_dir, method="convex_hull"), "dump")
+            with self.assertRaisesRegex(ValueError, "requested method=convex_hull"):
+                load_frame_cache(cache_path, required_method="convex_hull")
+            for dump_path in tstar_dir.glob("*.dump"):
+                dump_path.unlink()
+
+            dat_result = analyze_volume_probability_v2(
+                root,
+                out_dir=out_dir,
+                input_mode="dat",
+                bins=4,
+                grid_spacing=1.0,
+                threshold=0.60,
+                block_size=1,
+                min_timestep=101,
+                max_timestep=102,
+                write_plots=False,
+            )
+
+            self.assertEqual([row["timestep"] for row in dat_result.frame_records], [101, 102])
+
+    def test_volume_probability_v2_cli_defaults_output_to_root_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tstar_dir = root / "cases" / "lcden125_seed12345" / "result" / "Tstar_1.40"
+            tstar_dir.mkdir(parents=True)
+            (tstar_dir / "HEAV.lcden125.sample.0.dump").write_text(_dump_text(True), encoding="utf-8")
+            args = build_arg_parser().parse_args(
+                [
+                    str(root),
+                    "--no-plots",
+                    "--bins",
+                    "4",
+                    "--grid-spacing",
+                    "1.0",
+                    "--threshold",
+                    "0.60",
+                    "--block-size",
+                    "1",
+                    "--quiet",
+                ]
+            )
+
+            result = run_analysis(args)
+
+            self.assertEqual(result.out_dir, root.resolve())
+            self.assertTrue((root / FRAME_CACHE_DAT).exists())
+            self.assertTrue((root / "Volume_probability_summary_V2.dat").exists())
+
+    def test_volume_probability_v2_cli_reports_dump_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tstar_dir = root / "cases" / "lcden125_seed12345" / "result" / "Tstar_1.40"
+            tstar_dir.mkdir(parents=True)
+            for index in range(2):
+                (tstar_dir / f"HEAV.lcden125.sample.{index}.dump").write_text(
+                    _dump_text(True, timestep=100 + index),
+                    encoding="utf-8",
+                )
+            args = build_arg_parser().parse_args(
+                [
+                    str(root),
+                    "--no-plots",
+                    "--input-mode",
+                    "dump",
+                    "--bins",
+                    "4",
+                    "--grid-spacing",
+                    "1.0",
+                    "--threshold",
+                    "0.60",
+                    "--block-size",
+                    "1",
+                    "--progress-every",
+                    "1",
+                ]
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                run_analysis(args)
+
+            text = output.getvalue()
+            self.assertIn("[INFO] root =", text)
+            self.assertIn("found 2 sample dump files", text)
+            self.assertIn("processing dump 1/2", text)
+            self.assertIn("processed 2/2 dump files", text)
+            self.assertIn("wrote frame cache", text)
 
     def test_convex_hull_reports_missing_scipy(self):
         points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
