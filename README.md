@@ -204,9 +204,10 @@ python3 scripts/analyze_volume_probability.py experiments/smoke_volume_phase --m
 ```
 
 V2 keeps the old analyzer intact and adds V6-style probability figures plus a
-reusable frame cache. The first run computes per-frame volumes from dump files
-and writes `Volume_probability_frames_V2.dat`; later `--input-mode auto` runs
-reuse that cache and regenerate figures/tables without recomputing volume:
+reusable frame cache. The first run computes per-frame volumes for every
+matching `.sample.` dump file and writes `Volume_probability_frames_V2.dat`;
+later `--input-mode auto` runs reuse that cache and regenerate figures/tables
+without recomputing volume:
 
 ```bash
 python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase --method gaussian --grid-spacing 0.5 --bins 80
@@ -215,6 +216,23 @@ python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase 
 V2 outputs default to the root you pass in. If you `cd` into a simulation result
 directory and run the script without a root argument, it scans that directory's
 subfolders and writes the V2 `.dat` and figure files directly there.
+
+After the full frame cache exists, changing histogram bins or frame selection is
+fast and does not reread dump files:
+
+```bash
+python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase --input-mode dat --bins 120 --tail-frames-per-tstar 1000 --stride 5
+python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase --input-mode dat --bins 60 --min-timestep 200000 --max-timestep 600000
+```
+
+Changing `--method` changes the definition of volume, so it requires a new
+per-frame cache. Convex hull volume needs SciPy:
+
+```bash
+python3 -m pip install --user scipy matplotlib
+python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase --input-mode dump --method convex_hull --bins 80
+python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase --input-mode dat --method convex_hull --bins 120 --tail-frames-per-tstar 1000
+```
 
 Outputs are written under `analysis/volume_probability/`:
 

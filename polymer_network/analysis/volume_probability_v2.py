@@ -59,6 +59,8 @@ def analyze_volume_probability_v2(
     tail_frames_per_tstar: int | None = None,
     stride: int = 1,
     phase: str = "sample",
+    min_timestep: int | None = None,
+    max_timestep: int | None = None,
     volume_min: float | None = None,
     volume_max: float | None = None,
     smooth_window: int = 5,
@@ -78,6 +80,8 @@ def analyze_volume_probability_v2(
         smooth_window=smooth_window,
         min_peak_fraction=min_peak_fraction,
         max_acf_lag=max_acf_lag,
+        min_timestep=min_timestep,
+        max_timestep=max_timestep,
     )
 
     root = Path(root_dir).expanduser().resolve()
@@ -86,44 +90,52 @@ def analyze_volume_probability_v2(
         output = root / output
     output.mkdir(parents=True, exist_ok=True)
 
-    resolved_mode = resolve_input_mode(input_mode, root, out_dir=output, phase=phase)
+    resolved_mode = resolve_input_mode(input_mode, root, out_dir=output, phase=phase, method=method)
     if resolved_mode == "dat":
-        cache_path = find_frame_cache(root, out_dir=output)
+        cache_path = find_frame_cache(root, out_dir=output, method=method)
         if cache_path is None:
-            raise ValueError(f"No {FRAME_CACHE_DAT} cache found under {output} or {root}")
+            raise ValueError(f"No {FRAME_CACHE_DAT} cache for method={method} found under {output} or {root}")
         frame_records = load_frame_cache(
             cache_path,
             tail_frames_per_tstar=tail_frames_per_tstar,
             stride=stride,
             phase=phase,
+            min_timestep=min_timestep,
+            max_timestep=max_timestep,
+            required_method=method,
         )
     elif resolved_mode == "dump":
-        frame_records = build_frame_records_from_dump_tree(
+        cached_frame_records = build_frame_records_from_dump_tree(
             root,
             method=method,
             grid_spacing=grid_spacing,
             threshold=threshold,
             gaussian_cutoff_q2=gaussian_cutoff_q2,
             selected_types=selected_types,
-            tail_frames_per_tstar=tail_frames_per_tstar,
-            stride=stride,
             phase=phase,
         )
         write_frame_cache(
             output / FRAME_CACHE_DAT,
-            frame_records,
+            cached_frame_records,
             comments=[
                 "Volume probability V2 frame cache.",
-                "This file stores expensive per-frame volume calculations for fast plot regeneration.",
+                "This file stores expensive per-frame volume calculations for all matching sample frames.",
+                "Tail, stride, timestep, bin, and plotting choices are applied after this cache is loaded.",
                 f"method = {method}",
                 f"grid_spacing = {_format_value(grid_spacing)}",
                 f"threshold = {_format_value(threshold)}",
                 f"gaussian_cutoff_q2 = {_format_value(gaussian_cutoff_q2)}",
                 f"selected_types = {','.join(str(item) for item in sorted(selected_types))}",
                 f"phase = {phase}",
-                f"tail_frames_per_tstar = {tail_frames_per_tstar if tail_frames_per_tstar is not None else 'all'}",
-                f"stride = {stride}",
+                "cached_frame_selection = all_matching_sample_frames",
             ],
+        )
+        frame_records = select_tail_frame_records(
+            cached_frame_records,
+            tail_frames_per_tstar=tail_frames_per_tstar,
+            stride=stride,
+            min_timestep=min_timestep,
+            max_timestep=max_timestep,
         )
     else:
         raise ValueError("input_mode must be 'auto', 'dat', or 'dump'")
@@ -177,6 +189,8 @@ def _validate_common_args(
     smooth_window: int,
     min_peak_fraction: float,
     max_acf_lag: int,
+    min_timestep: int | None,
+    max_timestep: int | None,
 ) -> None:
     if bins <= 0:
         raise ValueError("bins must be positive")
@@ -192,6 +206,8 @@ def _validate_common_args(
         raise ValueError("min_peak_fraction must be positive")
     if max_acf_lag <= 0:
         raise ValueError("max_acf_lag must be positive")
+    if min_timestep is not None and max_timestep is not None and min_timestep > max_timestep:
+        raise ValueError("min_timestep must be less than or equal to max_timestep")
 
 
 def resolve_input_mode(
@@ -200,6 +216,7 @@ def resolve_input_mode(
     *,
     out_dir: str | Path | None = None,
     phase: str = "sample",
+    method: str | None = None,
 ) -> str:
     if requested_mode not in {"auto", "dat", "dump"}:
         raise ValueError("input_mode must be 'auto', 'dat', or 'dump'")
@@ -208,14 +225,19 @@ def resolve_input_mode(
 
     root = Path(root_dir).expanduser().resolve()
     output = Path(out_dir).expanduser().resolve() if out_dir is not None else None
-    if find_frame_cache(root, out_dir=output) is not None:
+    if find_frame_cache(root, out_dir=output, method=method) is not None:
         return "dat"
     if any(root.rglob(f"*.{phase}.*.dump")):
         return "dump"
     return "dat"
 
 
-def find_frame_cache(root_dir: str | Path, *, out_dir: str | Path | None = None) -> Path | None:
+def find_frame_cache(
+    root_dir: str | Path,
+    *,
+    out_dir: str | Path | None = None,
+    method: str | None = None,
+) -> Path | None:
     candidates = []
     if out_dir is not None:
         output_cache = Path(out_dir).expanduser()
@@ -227,9 +249,20 @@ def find_frame_cache(root_dir: str | Path, *, out_dir: str | Path | None = None)
 
     root = Path(root_dir).expanduser().resolve()
     candidates.extend(path.resolve() for path in root.rglob(FRAME_CACHE_DAT) if path.is_file())
-    if not candidates:
-        return None
-    return sorted(set(candidates), key=lambda path: (len(path.parts), str(path)))[0]
+    for candidate in sorted(set(candidates), key=lambda path: (len(path.parts), str(path))):
+        if frame_cache_matches_method(candidate, method):
+            return candidate
+    return None
+
+
+def frame_cache_matches_method(path: Path, method: str | None) -> bool:
+    if method is None:
+        return True
+    try:
+        metadata, _, _ = parse_dat_file(path)
+    except (OSError, ValueError):
+        return False
+    return metadata.get("method") == method
 
 
 def build_frame_records_from_dump_tree(
@@ -240,15 +273,13 @@ def build_frame_records_from_dump_tree(
     threshold: float,
     gaussian_cutoff_q2: float,
     selected_types: set[int],
-    tail_frames_per_tstar: int | None,
-    stride: int,
     phase: str,
 ) -> list[dict[str, object]]:
     root = Path(root_dir).expanduser().resolve()
     dump_paths = _selected_phase_dump_paths(
         sorted(root.rglob(f"*.{phase}.*.dump")),
-        tail_frames_per_tstar=tail_frames_per_tstar,
-        stride=stride,
+        tail_frames_per_tstar=None,
+        stride=1,
     )
     records: list[dict[str, object]] = []
     for read_order, dump_path in enumerate(dump_paths):
@@ -329,10 +360,18 @@ def load_frame_cache(
     tail_frames_per_tstar: int | None = None,
     stride: int = 1,
     phase: str | None = None,
+    min_timestep: int | None = None,
+    max_timestep: int | None = None,
+    required_method: str | None = None,
 ) -> list[dict[str, object]]:
     metadata, header, rows = parse_dat_file(path)
     if "row_kind" not in header:
         raise ValueError(f"{path} is not a V2 frame cache")
+    if required_method is not None and metadata.get("method") != required_method:
+        raise ValueError(
+            f"{path} was computed with method={metadata.get('method', 'unknown')}; "
+            f"requested method={required_method}"
+        )
 
     records = []
     for index, row in enumerate(rows):
@@ -353,7 +392,13 @@ def load_frame_cache(
             }
         )
 
-    return select_tail_frame_records(records, tail_frames_per_tstar=tail_frames_per_tstar, stride=stride)
+    return select_tail_frame_records(
+        records,
+        tail_frames_per_tstar=tail_frames_per_tstar,
+        stride=stride,
+        min_timestep=min_timestep,
+        max_timestep=max_timestep,
+    )
 
 
 def parse_dat_file(path: str | Path) -> tuple[dict[str, str], list[str], list[dict[str, str]]]:
@@ -399,9 +444,16 @@ def select_tail_frame_records(
     *,
     tail_frames_per_tstar: int | None,
     stride: int,
+    min_timestep: int | None = None,
+    max_timestep: int | None = None,
 ) -> list[dict[str, object]]:
     grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for record in frame_records:
+        timestep = to_int(record.get("timestep"), default=None)
+        if min_timestep is not None and timestep is not None and timestep < min_timestep:
+            continue
+        if max_timestep is not None and timestep is not None and timestep > max_timestep:
+            continue
         grouped[(str(record["case_label"]), str(record["tstar"]))].append(record)
 
     selected = []
@@ -1512,6 +1564,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--block-size", type=int, default=10)
     parser.add_argument("--tail-frames-per-tstar", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--min-timestep", type=int, default=None, help="Use cached frames at or after this timestep.")
+    parser.add_argument("--max-timestep", type=int, default=None, help="Use cached frames at or before this timestep.")
     parser.add_argument("--volume-min", type=float, default=None)
     parser.add_argument("--volume-max", type=float, default=None)
     parser.add_argument("--smooth-window", type=int, default=5)
@@ -1543,6 +1597,8 @@ def run_analysis(args: argparse.Namespace) -> VolumeProbabilityV2Result:
         tail_frames_per_tstar=args.tail_frames_per_tstar,
         stride=args.stride,
         phase=args.phase,
+        min_timestep=args.min_timestep,
+        max_timestep=args.max_timestep,
         volume_min=args.volume_min,
         volume_max=args.volume_max,
         smooth_window=args.smooth_window,
