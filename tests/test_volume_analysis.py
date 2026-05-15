@@ -10,6 +10,14 @@ from polymer_network.analysis.volume import (
     gaussian_density_volume,
 )
 from polymer_network.analysis.volume_probability import analyze_volume_probability
+from polymer_network.analysis.volume_probability_v2 import (
+    FRAME_CACHE_DAT,
+    analyze_volume_probability_v2,
+    build_arg_parser,
+    load_frame_cache,
+    resolve_input_mode,
+    run_analysis,
+)
 
 
 def _dump_text(include_unwrapped=True):
@@ -177,6 +185,83 @@ class VolumeAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "No sample dump frames"):
                 analyze_volume_probability(Path(temp_dir), out_dir=Path(temp_dir) / "analysis")
+
+    def test_volume_probability_v2_writes_and_reuses_frame_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tstar_dir = root / "cases" / "lcden125_seed12345" / "result" / "Tstar_1.40"
+            tstar_dir.mkdir(parents=True)
+            (tstar_dir / "HEAV.lcden125.sample.0.dump").write_text(_dump_text(True), encoding="utf-8")
+            out_dir = root / "analysis_v2"
+
+            result = analyze_volume_probability_v2(
+                root,
+                out_dir=out_dir,
+                input_mode="dump",
+                bins=4,
+                grid_spacing=1.0,
+                threshold=0.60,
+                block_size=1,
+                tail_frames_per_tstar=1,
+                write_plots=False,
+            )
+
+            cache_path = out_dir / FRAME_CACHE_DAT
+            self.assertTrue(cache_path.exists())
+            cache_text = cache_path.read_text(encoding="utf-8")
+            self.assertIn("row_kind", cache_text)
+            self.assertIn("volume", cache_text)
+            self.assertEqual(len(result.frame_records), 1)
+            self.assertTrue((out_dir / "Volume_probability_summary_V2.dat").exists())
+            self.assertTrue((out_dir / "Volume_probability_bins_all_cases_V2.dat").exists())
+
+            cached = load_frame_cache(cache_path)
+            self.assertEqual(len(cached), 1)
+            self.assertEqual(cached[0]["case_label"], "lcden125_seed12345")
+            self.assertEqual(cached[0]["tstar"], "Tstar_1.40")
+            self.assertEqual(float(cached[0]["volume"]), float(result.frame_records[0]["volume"]))
+
+            self.assertEqual(resolve_input_mode("auto", root, out_dir=out_dir), "dat")
+
+            dat_result = analyze_volume_probability_v2(
+                root,
+                out_dir=out_dir,
+                input_mode="dat",
+                bins=4,
+                grid_spacing=1.0,
+                threshold=0.60,
+                block_size=1,
+                write_plots=False,
+            )
+
+            self.assertEqual(dat_result.frame_records, cached)
+
+    def test_volume_probability_v2_cli_defaults_output_to_root_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tstar_dir = root / "cases" / "lcden125_seed12345" / "result" / "Tstar_1.40"
+            tstar_dir.mkdir(parents=True)
+            (tstar_dir / "HEAV.lcden125.sample.0.dump").write_text(_dump_text(True), encoding="utf-8")
+            args = build_arg_parser().parse_args(
+                [
+                    str(root),
+                    "--no-plots",
+                    "--bins",
+                    "4",
+                    "--grid-spacing",
+                    "1.0",
+                    "--threshold",
+                    "0.60",
+                    "--block-size",
+                    "1",
+                ]
+            )
+
+            result = run_analysis(args)
+
+            self.assertEqual(result.out_dir, root.resolve())
+            self.assertTrue((root / FRAME_CACHE_DAT).exists())
+            self.assertTrue((root / "Volume_probability_summary_V2.dat").exists())
 
     def test_convex_hull_reports_missing_scipy(self):
         points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]

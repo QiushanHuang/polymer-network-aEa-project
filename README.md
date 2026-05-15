@@ -203,6 +203,19 @@ Analyze volume distributions:
 python3 scripts/analyze_volume_probability.py experiments/smoke_volume_phase --method gaussian --grid-spacing 0.5 --bins 50 --tail-frames-per-tstar 200 --stride 5
 ```
 
+V2 keeps the old analyzer intact and adds V6-style probability figures plus a
+reusable frame cache. The first run computes per-frame volumes from dump files
+and writes `Volume_probability_frames_V2.dat`; later `--input-mode auto` runs
+reuse that cache and regenerate figures/tables without recomputing volume:
+
+```bash
+python3 scripts/analyze_volume_probability_V2.py experiments/smoke_volume_phase --method gaussian --grid-spacing 0.5 --bins 80
+```
+
+V2 outputs default to the root you pass in. If you `cd` into a simulation result
+directory and run the script without a root argument, it scans that directory's
+subfolders and writes the V2 `.dat` and figure files directly there.
+
 Outputs are written under `analysis/volume_probability/`:
 
 - `Volume_probability_summary.dat`
